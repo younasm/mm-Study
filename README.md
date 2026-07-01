@@ -66,7 +66,7 @@ For questions, collaborations, or early access inquiries, please reach out via t
 
 ## 📜 License
 
-The license for this dataset and codebase will be specified upon release. All rights reserved until then.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
 
 ---
 
