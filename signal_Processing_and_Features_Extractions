@@ -1,0 +1,654 @@
+% with TDM-MIMO
+
+clear all; clc;
+% Load Data
+filename = '/Users/younas/Dev/Matlab/mmStudy/expended dataset/100d/drink/d1_Raw_0.bin';
+adcDataRaw = readDCA1000(filename);
+% Parameters
+numADCSamples  = 256;
+numTx          = 2;
+numRx          = 4;
+loops          = 128;
+frames         = 100;
+c               = 3e8;
+f_c             = 77e9;
+lambda          = c / f_c;
+d               = lambda / 2;
+B               = 3997.56e6;
+chirpDuration   = 50e-3;
+rangeResolution = c / (2 * B);
+numVirtualRx     = numRx * numTx;
+numChirpsVirtual = loops / numTx;
+% Reshape [Rx, ADCSamples, Chirps, Frames]
+adcDataRaw = reshape(adcDataRaw, numRx, numADCSamples, loops, frames);
+% Virtual Array Formation (TDM-MIMO)
+adcDataVirtual = zeros(numVirtualRx, numADCSamples, numChirpsVirtual, frames);
+for txIdx = 1:numTx
+    adcDataVirtual((txIdx-1)*numRx+1:txIdx*numRx, :, :, :) = ...
+        adcDataRaw(:, :, txIdx:numTx:end, :);
+end
+% Range FFT
+window1D       = hamming(numADCSamples)';
+adcDataVirtual = adcDataVirtual .* window1D;
+adcDataVirtual = adcDataVirtual - mean(adcDataVirtual, 3);  % within-frame clutter removal
+rangeFFT = fft(adcDataVirtual, numADCSamples, 2);
+rangeFFT = rangeFFT / numADCSamples;
+rangeFFT = rangeFFT(:, 1:numADCSamples/2, :, :);
+% Cross-frame clutter removal (ENABLED) -> removes the static 0-Doppler lines
+rangeFFT = rangeFFT - mean(rangeFFT, 4);
+numRangeBins = size(rangeFFT, 2);
+rangeAxis    = (0:numRangeBins-1) * rangeResolution;
+% Doppler FFT
+window2D = reshape(hamming(numChirpsVirtual)', [1 1 numChirpsVirtual 1]);
+rangeFFT_windowed = rangeFFT .* window2D;
+dopplerFFT = fftshift(fft(rangeFFT_windowed, numChirpsVirtual, 3), 3);
+dopplerFFT = dopplerFFT / numChirpsVirtual;
+PRT            = chirpDuration;
+fd_max         = 1 / (2 * PRT);
+maxDoppler     = fd_max * lambda;
+numDopplerBins = size(dopplerFFT, 3);
+numFrames      = size(dopplerFFT, 4);
+dopplerAxis = linspace(-maxDoppler, maxDoppler, numDopplerBins);
+timeAxis    = (0:numFrames-1) * chirpDuration;
+% Doppler-Time Map
+rangeEnd   = 100;
+rangeStart = 1;
+dopplerTimeMap = zeros(numDopplerBins, numFrames);
+for frameIdx = 1:numFrames
+    dopplerSlice = zeros(numDopplerBins, 1);
+    for r = rangeStart:rangeEnd
+        frameData    = squeeze(dopplerFFT(:, r, :, frameIdx));
+        dopplerMag   = mean(abs(frameData), 1);
+        dopplerSlice = dopplerSlice + dopplerMag.';
+    end
+    dopplerTimeMap(:, frameIdx) = dopplerSlice / (rangeEnd - rangeStart + 1);
+end
+% Peak-normalize (linear) + dB
+dopplerTimeMap = dopplerTimeMap / max(dopplerTimeMap(:));
+dopplerTimeMap_dB = 20 * log10(dopplerTimeMap + eps);
+dopplerTimeMap_dB(dopplerTimeMap_dB < -20) = -20;   % floor clip
+% ---- Plot 1: full Doppler-Time spectrogram (dB, jet) ----
+figure;
+imagesc(timeAxis, dopplerAxis, dopplerTimeMap_dB);
+caxis([-20 0]);
+xlabel('Time (s)'); ylabel('Doppler Velocity (m/s)');
+title('Doppler-Time Map');
+colormap(jet); colorbar; set(gca, 'YDir', 'normal');
+% ROI extraction (adaptive threshold + component filter)
+meanSpec  = mean(dopplerTimeMap_dB(:));
+stdSpec   = std(dopplerTimeMap_dB(:));
+threshold = meanSpec + 2 * stdSpec;
+binaryMask = dopplerTimeMap_dB > threshold;
+CC    = bwconncomp(binaryMask);
+stats = regionprops(CC, 'Area');
+minArea = 3;
+filteredMask = false(size(binaryMask));
+for i = 1:numel(stats)
+    if stats(i).Area > minArea
+        filteredMask(CC.PixelIdxList{i}) = true;
+    end
+end
+maskedSpectrogram = dopplerTimeMap_dB .* filteredMask;
+% ---- Plot 2: masked ROI (gray) ----
+figure;
+imagesc(timeAxis, dopplerAxis, maskedSpectrogram);
+caxis([-20 0]);
+colormap(gray); colorbar; set(gca, 'YDir', 'normal');
+xlabel('Time (s)'); ylabel('Doppler Velocity (m/s)');
+title('Masked Doppler-Time Map with ROI');
+
+%% without TDM-MIMO
+clear all; clc;
+
+% Load the binary data
+filename = '/Users/younas/Dev/Matlab/mmStudy/expended dataset/100d/drink/d1_Raw_0.bin';
+adcData = readDCA1000(filename);
+
+% Reshape data to separate channels
+numADCSamples = 256;
+numRx = 4;
+loops = 128;
+frames = 100;
+adcData = reshape(adcData, numRx, numADCSamples, loops, frames);
+
+% Parameters
+samplingRate = 10e3;          % ADC sample rate -> range axis only
+freqSlope    = 60.012e12;
+B            = 3600.72e6;
+c            = 3e8;
+f_c          = 77e9;
+lambda       = c / f_c;
+
+% --- Chirp / frame timing (FIX 2) ---
+idleTime      = 100e-6;                 % from chirp config
+rampEndTime   = 57e-6;                  % corrected (was 60e-6)
+T_c           = idleTime + rampEndTime; % chirp cycle time / PRI = 157 us
+PRF           = 1 / T_c;
+T_framePeriod = 50e-3;                  % frame repetition period (was mislabeled T_chirp)
+
+% Clutter removal (subtract mean over slow-time / chirps)
+adcData = adcData - mean(adcData, 3);
+
+% Range window + Range FFT
+windowRange = hamming(numADCSamples)';
+adcData     = adcData .* windowRange;
+rangeFFT    = fft(adcData, numADCSamples, 2) / numADCSamples;
+
+% Doppler window + Doppler FFT
+windowDoppler = reshape(hamming(loops)', [1, 1, loops, 1]);
+rangeFFT      = rangeFFT .* windowDoppler;
+dopplerFFT    = fftshift(fft(rangeFFT, loops, 3), 3);
+dopplerMagnitude = abs(dopplerFFT);
+
+% Collapse Rx + range -> Doppler-time
+% (sum keeps target energy better than mean-over-all-bins; switch if preferred)
+avgDopplerMagnitude = squeeze(sum(sum(dopplerMagnitude, 1), 2));   % [loops x frames]
+
+avgDopplerMagnitude = avgDopplerMagnitude / max(avgDopplerMagnitude(:));   % 0 dB = peak
+
+% --- Axes (FIX 1: Doppler axis from PRF, not ADC rate) ---
+dopplerFreqAxis = (-loops/2 : loops/2-1) * (PRF / loops);
+velocityAxis    = dopplerFreqAxis * lambda / 2;          % v_max = lambda/(4*T_c)
+timeAxis        = (0:frames-1) * T_framePeriod;
+
+% Convert to dB (computed once)
+avgDopplerMagnitude_dB = 20 * log10(avgDopplerMagnitude + eps);
+
+% Adaptive thresholding
+meanSpec  = mean(avgDopplerMagnitude_dB(:));
+stdSpec   = std(avgDopplerMagnitude_dB(:));
+threshold = meanSpec + 2 * stdSpec;
+
+% Binarization
+binaryMask = avgDopplerMagnitude_dB > threshold;
+
+% Connected component analysis
+CC    = bwconncomp(binaryMask);
+stats = regionprops(CC, 'BoundingBox', 'Area');
+
+% Filter small components
+minArea      = 3;
+filteredMask = false(size(binaryMask));
+for i = 1:length(stats)
+    if stats(i).Area > minArea
+        filteredMask(CC.PixelIdxList{i}) = true;
+    end
+end
+
+% Apply mask to spectrogram
+maskedSpectrogram = avgDopplerMagnitude_dB .* filteredMask;
+
+% Interpolation for smoothing
+interpFactor      = 2;
+interpTimeAxis     = linspace(min(timeAxis), max(timeAxis), length(timeAxis) * interpFactor);
+interpVelocityAxis = linspace(min(velocityAxis), max(velocityAxis), length(velocityAxis) * interpFactor);
+
+[timeGrid, velocityGrid]             = meshgrid(timeAxis, velocityAxis);
+[interpTimeGrid, interpVelocityGrid] = meshgrid(interpTimeAxis, interpVelocityAxis);
+
+avgDopplerMagnitude_dB_Interp = interp2(timeGrid, velocityGrid, avgDopplerMagnitude_dB, ...
+                                        interpTimeGrid, interpVelocityGrid, 'spline');
+
+% Plot full Velocity-Time spectrogram (dB)
+figure;
+imagesc(interpTimeAxis, interpVelocityAxis, avgDopplerMagnitude_dB_Interp);
+colorbar; colormap(jet);
+set(gca, 'YDir', 'normal');
+xlabel('Time (s)'); ylabel('Velocity (m/s)');
+title('Velocity-Time Spectrogram (dB)');
+
+% Plot masked spectrogram with ROI
+figure;
+imagesc(timeAxis, velocityAxis, maskedSpectrogram);
+colorbar; colormap(gray);
+set(gca, 'YDir', 'normal');
+xlabel('Time (s)'); ylabel('Velocity (m/s)');
+title('Masked Velocity-Time Spectrogram with ROI');
+
+
+%% ===================== ROI map + two feature sets =====================
+% From above: avgDopplerMagnitude (peak-normalized linear, [vel x time]),
+%             velocityAxis [1 x loops], timeAxis [1 x frames]
+
+avgDopplerMagnitude_dB = 20*log10(avgDopplerMagnitude + eps);
+saveTag  = 'object2';
+floor_dB = -25;          % display/save floor (matches your ~-22 dB colorbar)
+
+% ---------- 1. ROI mask (your original adaptive method -> Image 1) ----------
+meanSpec  = mean(avgDopplerMagnitude_dB(:));
+stdSpec   = std(avgDopplerMagnitude_dB(:));
+threshold = meanSpec + 2*stdSpec;
+
+binaryMask = avgDopplerMagnitude_dB > threshold;
+CC    = bwconncomp(binaryMask);
+stats = regionprops(CC, 'Area');
+minArea = 3;
+filteredMask = false(size(binaryMask));
+for i = 1:numel(stats)
+    if stats(i).Area > minArea
+        filteredMask(CC.PixelIdxList{i}) = true;
+    end
+end
+maskedSpectrogram = avgDopplerMagnitude_dB .* filteredMask;   % gray ROI map
+
+% ---------- 2. ROI morphology features (from the gray ROI mask) ----------
+% Treat the whole foreground as ONE region (union of all blobs) so each
+% descriptor is a single value per sample. Label matrix = all foreground -> 1.
+Lall = double(filteredMask);
+roiStats = regionprops(Lall, 'Area','Centroid','Orientation','Perimeter', ...
+                             'MajorAxisLength','MinorAxisLength','Eccentricity');
+
+roiFeat.Area            = roiStats.Area;             % pixels
+roiFeat.Centroid        = roiStats.Centroid;         % [x=time-idx, y=vel-idx]
+roiFeat.Orientation     = roiStats.Orientation;      % degrees
+roiFeat.Perimeter       = roiStats.Perimeter;        % pixels
+roiFeat.MajorAxisLength = roiStats.MajorAxisLength;  % pixels
+roiFeat.MinorAxisLength = roiStats.MinorAxisLength;  % pixels
+roiFeat.Eccentricity    = roiStats.Eccentricity;     % 0=circle, 1=line
+
+% ---------- 3. Spectrogram features (from the FULL doppler-time spectrum) --
+P = avgDopplerMagnitude;          % full linear power, [vel x time]
+v = velocityAxis(:);              % [vel x 1]
+
+% Energy curve (per time frame, over all velocity bins)
+energyCurve = sum(P, 1);                                    % [1 x frames]
+
+% Doppler centroid + bandwidth curves (power-weighted, per time frame)
+W = P ./ (sum(P,1) + eps);
+centroidCurve  = sum(W .* v, 1);                            % [1 x frames]
+bandwidthCurve = sqrt(sum(W .* (v - centroidCurve).^2, 1)); % [1 x frames]
+
+% Entropy (Shannon, over whole spectrogram power distribution)
+p = P(:); p = p / (sum(p) + eps);
+specEntropy = -sum(p .* log2(p + eps));
+
+% Skewness of the power-weighted velocity marginal (micro-Doppler asymmetry)
+Pv = sum(P,2); wv = Pv / (sum(Pv) + eps);
+muV  = sum(wv .* v);
+sigV = sqrt(sum(wv .* (v - muV).^2));
+specSkewness = sum(wv .* (v - muV).^3) / (sigV^3 + eps);
+
+specFeat.entropy        = specEntropy;
+specFeat.skewness       = specSkewness;
+specFeat.centroidCurve  = centroidCurve;    % sequence input
+specFeat.bandwidthCurve = bandwidthCurve;   % sequence input
+specFeat.energyCurve    = energyCurve;      % sequence input
+specFeat.centroidMean   = mean(centroidCurve);
+specFeat.bandwidthMean  = mean(bandwidthCurve);
+specFeat.energyTotal    = sum(energyCurve);
+
+% ---------- 4. Borderless save of the gray ROI map (dataset image) ----------
+gimg = (maskedSpectrogram - floor_dB) / (0 - floor_dB);   % 0 dB bg -> white
+gimg = flipud(min(max(gimg,0),1));                        % match normal-Y display
+imwrite(im2uint8(gimg), sprintf('ROI_%s_gray.png', saveTag));
+
+% ---------- 5. Save features ----------
+save(sprintf('FEAT_%s.mat', saveTag), 'roiFeat', 'specFeat');
+
+featRow = table(string(saveTag), ...
+    roiFeat.Area, roiFeat.Orientation, roiFeat.Centroid(1), roiFeat.Centroid(2), ...
+    roiFeat.Perimeter, roiFeat.MajorAxisLength, roiFeat.MinorAxisLength, roiFeat.Eccentricity, ...
+    specFeat.entropy, specFeat.skewness, specFeat.centroidMean, specFeat.bandwidthMean, specFeat.energyTotal, ...
+    'VariableNames', {'FileName','Area','Orientation','CentroidX','CentroidY', ...
+    'Perimeter','MajorAxis','MinorAxis','Eccentricity', ...
+    'Entropy','Skewness','CentroidMean','BandwidthMean','EnergyTotal'});
+
+% ---------- 6. Verification: the two correct plots ----------
+figure;
+imagesc(timeAxis, velocityAxis, max(avgDopplerMagnitude_dB, floor_dB));
+set(gca,'YDir','normal'); colormap(jet); colorbar;
+xlabel('Time (s)'); ylabel('Velocity (m/s)'); title('Doppler-Time Spectrogram (dB)');
+
+figure;
+imagesc(timeAxis, velocityAxis, maskedSpectrogram);
+set(gca,'YDir','normal'); colormap(gray); colorbar;
+xlabel('Time (s)'); ylabel('Velocity (m/s)'); title('Extracted ROI (gray)');
+
+
+%% full code to read once all the .bin files in the folder
+
+%% ============================ BATCH DRIVER ============================ with TDM-MIMO
+clear; clc;
+% ---- set these per folder/run ----
+binFolder      = '/Users/younas/Dev/Matlab/mmStudy/expended dataset/200d/study';      % folder of .bin files
+activityLabel  = 'study';        % one activity per folder -> Activity label
+conditionLabel = 'Focused';        % Focused / Distracted (your convention)
+outDir         = fullfile(binFolder, 'output');         % where everything is saved
+% ---- acquisition / chirp parameters (shared by every file) ----
+P.numADCSamples = 256;
+P.numTx         = 2;                              % TDM-MIMO: 2 Tx
+P.numRx         = 4;
+P.loops         = 128;                            % total chirps per frame (both Tx)
+P.frames        = 200;
+P.c             = 3e8;
+P.f_c           = 77e9;
+P.lambda        = P.c / P.f_c;
+P.B             = 3997.56e6;
+P.rangeRes      = P.c / (2 * P.B);
+P.chirpDuration = 50e-3;                          % per-frame Doppler interval (PRT)
+P.numVirtualRx     = P.numRx * P.numTx;          % 8 virtual channels
+P.numChirpsVirtual = P.loops / P.numTx;          % 64 chirps after de-interleave
+P.rangeStart    = 1;                             % range bins to integrate over Doppler-time
+P.rangeEnd      = 100;
+P.minArea       = 3;
+P.floor_dB      = -25;        % floor for the grayscale ROI save
+P.floor_dB_rgb  = -30;        % floor for the RGB spectrogram save
+P.snrThreshold  = 15;         % below this (dB) -> flagged as low-SNR / weak capture
+% ---- prep output folder ----
+if ~exist(outDir, 'dir'); mkdir(outDir); end
+% ---- list .bin files ----
+files = dir(fullfile(binFolder, '*.bin'));
+fprintf('Found %d .bin files in %s\n', numel(files), binFolder);
+masterTable = [];
+for k = 1:numel(files)
+    binPath  = fullfile(files(k).folder, files(k).name);
+    [~, tag] = fileparts(files(k).name);     % FileName = bin name without extension
+try
+        [featRow, roiFeat, specFeat] = extract_roi_features( ...
+            binPath, tag, P, activityLabel, conditionLabel, outDir);
+% per-file .mat keeps the full feature curves (energy/centroid/bandwidth)
+        save(fullfile(outDir, sprintf('FEAT_%s.mat', tag)), 'roiFeat', 'specFeat');
+        masterTable = [masterTable; featRow]; %#ok<AGROW>
+% flag low-SNR captures inline so they are easy to spot
+        if featRow.SNRproxy < P.snrThreshold
+            fprintf('  [%3d/%3d] %-30s  OK  (LOW SNR %.1f dB)\n', ...
+                k, numel(files), files(k).name, featRow.SNRproxy);
+        else
+            fprintf('  [%3d/%3d] %-30s  OK\n', k, numel(files), files(k).name);
+        end
+catch ME
+        fprintf('  [%3d/%3d] %-30s  SKIPPED: %s\n', ...
+            k, numel(files), files(k).name, ME.message);
+end
+end
+% ---- write one master table keyed by FileName ----
+if ~isempty(masterTable)
+    csvPath = fullfile(outDir, sprintf('features_%s_%s.csv', activityLabel, conditionLabel));
+    writetable(masterTable, csvPath);
+    save(fullfile(outDir, sprintf('features_%s_%s.mat', activityLabel, conditionLabel)), 'masterTable');
+    nLow = sum(masterTable.SNRproxy < P.snrThreshold);
+    fprintf('\nDone. %d files processed (%d flagged low-SNR).\n', height(masterTable), nLow);
+    fprintf('Images + per-file .mat in: %s\n', outDir);
+    fprintf('Master table: %s\n', csvPath);
+else
+    fprintf('\nNo files processed successfully.\n');
+end
+%% ====================== PER-FILE PROCESSING FUNCTION ======================
+function [featRow, roiFeat, specFeat] = extract_roi_features(binPath, tag, P, activityLabel, conditionLabel, outDir)
+% ---- load + reshape [Rx, ADC, Chirps, Frames] ----
+    adcDataRaw = readDCA1000(binPath);
+    adcDataRaw = reshape(adcDataRaw, P.numRx, P.numADCSamples, P.loops, P.frames);
+% ---- TDM-MIMO virtual array formation (de-interleave the 2 Tx) ----
+    adcDataVirtual = zeros(P.numVirtualRx, P.numADCSamples, P.numChirpsVirtual, P.frames);
+    for txIdx = 1:P.numTx
+        adcDataVirtual((txIdx-1)*P.numRx+1 : txIdx*P.numRx, :, :, :) = ...
+            adcDataRaw(:, :, txIdx:P.numTx:end, :);
+    end
+% ---- range window + within-frame clutter removal + range FFT ----
+    window1D       = hamming(P.numADCSamples)';
+    adcDataVirtual = adcDataVirtual .* window1D;
+    adcDataVirtual = adcDataVirtual - mean(adcDataVirtual, 3);   % within-frame clutter removal
+    rangeFFT = fft(adcDataVirtual, P.numADCSamples, 2) / P.numADCSamples;
+    rangeFFT = rangeFFT(:, 1:P.numADCSamples/2, :, :);           % keep positive-range half
+% ---- cross-frame clutter removal -> removes static 0-Doppler lines ----
+    rangeFFT = rangeFFT - mean(rangeFFT, 4);
+% ---- doppler window + doppler FFT ----
+    window2D = reshape(hamming(P.numChirpsVirtual)', [1 1 P.numChirpsVirtual 1]);
+    rangeFFT_windowed = rangeFFT .* window2D;
+    dopplerFFT = fftshift(fft(rangeFFT_windowed, P.numChirpsVirtual, 3), 3) / P.numChirpsVirtual;
+% ---- axes ----
+    fd_max         = 1 / (2 * P.chirpDuration);
+    maxDoppler     = fd_max * P.lambda;
+    numDopplerBins = size(dopplerFFT, 3);
+    numFrames      = size(dopplerFFT, 4);
+    velocityAxis   = linspace(-maxDoppler, maxDoppler, numDopplerBins).';   % [vel x 1]
+    timeAxis       = (0:numFrames-1) * P.chirpDuration;
+% ---- Doppler-time map (integrate over range bins) ----
+    rEnd = min(P.rangeEnd, size(dopplerFFT,2));
+    dopplerTimeMap = zeros(numDopplerBins, numFrames);
+    for frameIdx = 1:numFrames
+        dopplerSlice = zeros(numDopplerBins, 1);
+        for r = P.rangeStart:rEnd
+            frameData  = squeeze(dopplerFFT(:, r, :, frameIdx));
+            dopplerMag = mean(abs(frameData), 1);
+            dopplerSlice = dopplerSlice + dopplerMag.';
+        end
+        dopplerTimeMap(:, frameIdx) = dopplerSlice / (rEnd - P.rangeStart + 1);
+    end
+% ---- peak-normalize (linear) + dB ----
+    avgDoppler    = dopplerTimeMap / max(dopplerTimeMap(:));     % [vel x time], linear
+    avgDoppler_dB = 20*log10(avgDoppler + eps);
+% ---- SNR proxy (peak is always 0 dB, so -median ≈ peak-to-noise gap) ----
+    snrProxy = -median(avgDoppler_dB(:));
+% ---- ROI mask (adaptive mean + 2*std, component filter) ----
+    meanSpec  = mean(avgDoppler_dB(:));
+    stdSpec   = std(avgDoppler_dB(:));
+    threshold = meanSpec + 2*stdSpec;
+    binaryMask = avgDoppler_dB > threshold;
+    CC    = bwconncomp(binaryMask);
+    stats = regionprops(CC, 'Area');
+    filteredMask = false(size(binaryMask));
+for i = 1:numel(stats)
+if stats(i).Area > P.minArea
+            filteredMask(CC.PixelIdxList{i}) = true;
+end
+end
+if ~any(filteredMask(:))
+        error('empty ROI (no pixels above threshold)');
+end
+    maskedSpectrogram = avgDoppler_dB .* filteredMask;
+% ---- ROI morphology features (union of foreground as one region) ----
+    rs = regionprops(double(filteredMask), 'Area','Centroid','Orientation', ...
+'Perimeter','MajorAxisLength','MinorAxisLength','Eccentricity');
+    roiFeat.Area            = rs.Area;
+    roiFeat.Centroid        = rs.Centroid;
+    roiFeat.Orientation     = rs.Orientation;
+    roiFeat.Perimeter       = rs.Perimeter;
+    roiFeat.MajorAxisLength = rs.MajorAxisLength;
+    roiFeat.MinorAxisLength = rs.MinorAxisLength;
+    roiFeat.Eccentricity    = rs.Eccentricity;
+% ---- spectrogram features (full linear power) ----
+    Pw = avgDoppler;  v = velocityAxis;
+    energyCurve = sum(Pw, 1);
+    W = Pw ./ (sum(Pw,1) + eps);
+    centroidCurve  = sum(W .* v, 1);
+    bandwidthCurve = sqrt(sum(W .* (v - centroidCurve).^2, 1));
+    p = Pw(:); p = p / (sum(p) + eps);
+    specEntropy = -sum(p .* log2(p + eps));
+    Pv = sum(Pw,2); wv = Pv / (sum(Pv) + eps);
+    muV  = sum(wv .* v);
+    sigV = sqrt(sum(wv .* (v - muV).^2));
+    specSkewness = sum(wv .* (v - muV).^3) / (sigV^3 + eps);
+    specFeat.entropy        = specEntropy;
+    specFeat.skewness       = specSkewness;
+    specFeat.centroidCurve  = centroidCurve;
+    specFeat.bandwidthCurve = bandwidthCurve;
+    specFeat.energyCurve    = energyCurve;
+    specFeat.centroidMean   = mean(centroidCurve);
+    specFeat.bandwidthMean  = mean(bandwidthCurve);
+    specFeat.energyTotal    = sum(energyCurve);
+    specFeat.snrProxy       = snrProxy;
+% ---- borderless gray ROI image (dataset input) ----
+    gimg = (maskedSpectrogram - P.floor_dB) / (0 - P.floor_dB);
+    gimg = flipud(min(max(gimg,0),1));
+    imwrite(im2uint8(gimg), fullfile(outDir, sprintf('ROI_%s.png', tag)));
+% ---- borderless RGB doppler-time spectrogram (jet, dataset input) ----
+    rgbimg = (avgDoppler_dB - P.floor_dB_rgb) / (0 - P.floor_dB_rgb);
+    rgbimg = flipud(min(max(rgbimg,0),1));
+    rgbimg = ind2rgb(im2uint8(rgbimg), jet(256));
+    imwrite(rgbimg, fullfile(outDir, sprintf('RGB_%s.png', tag)));
+% ---- scalar feature row keyed by FileName ----
+    featRow = table(string(tag), string(activityLabel), string(conditionLabel), ...
+        roiFeat.Area, roiFeat.Orientation, roiFeat.Centroid(1), roiFeat.Centroid(2), ...
+        roiFeat.Perimeter, roiFeat.MajorAxisLength, roiFeat.MinorAxisLength, roiFeat.Eccentricity, ...
+        specFeat.entropy, specFeat.skewness, specFeat.centroidMean, specFeat.bandwidthMean, specFeat.energyTotal, ...
+        snrProxy, ...
+'VariableNames', {'FileName','Activity','Condition', ...
+'Area','Orientation','CentroidX','CentroidY','Perimeter', ...
+'MajorAxis','MinorAxis','Eccentricity', ...
+'Entropy','Skewness','CentroidMean','BandwidthMean','EnergyTotal', ...
+'SNRproxy'});
+end
+
+%% =========================== =====================================
+
+
+%% ============================ BATCH DRIVER ============================ without TDM
+
+clear; clc;
+% ---- set these per folder/run ----
+binFolder      = '/Users/younas/Dev/Matlab/mmStudy/Each Person Samples/p10/usingphone';      % folder of .bin files
+activityLabel  = 'leave';        % one activity per folder -> Activity label
+conditionLabel = 'Focused';        % Focused / Distracted (your convention)
+outDir         = fullfile(binFolder, 'output');         % where everything is saved
+% ---- acquisition / chirp parameters (shared by every file) ----
+P.numADCSamples = 256;
+P.numRx         = 4;
+P.loops         = 32;
+P.frames        = 100;
+P.c             = 3e8;
+P.f_c           = 77e9;
+P.lambda        = P.c / P.f_c;
+P.idleTime      = 100e-6;
+P.rampEndTime   = 57e-6;
+P.T_c           = P.idleTime + P.rampEndTime;     % 157 us
+P.PRF           = 1 / P.T_c;
+P.T_framePeriod = 50e-3;
+P.minArea       = 3;
+P.floor_dB      = -25;        % floor for the grayscale ROI save
+P.floor_dB_rgb  = -30;        % floor for the RGB spectrogram save
+P.snrThreshold  = 15;         % below this (dB) -> flagged as low-SNR / weak capture
+% ---- prep output folder ----
+if ~exist(outDir, 'dir'); mkdir(outDir); end
+% ---- list .bin files ----
+files = dir(fullfile(binFolder, '*.bin'));
+fprintf('Found %d .bin files in %s\n', numel(files), binFolder);
+masterTable = [];
+for k = 1:numel(files)
+    binPath  = fullfile(files(k).folder, files(k).name);
+    [~, tag] = fileparts(files(k).name);     % FileName = bin name without extension
+try
+        [featRow, roiFeat, specFeat] = extract_roi_features( ...
+            binPath, tag, P, activityLabel, conditionLabel, outDir);
+% per-file .mat keeps the full feature curves (energy/centroid/bandwidth)
+        save(fullfile(outDir, sprintf('FEAT_%s.mat', tag)), 'roiFeat', 'specFeat');
+        masterTable = [masterTable; featRow]; %#ok<AGROW>
+% flag low-SNR captures inline so they are easy to spot
+        if featRow.SNRproxy < P.snrThreshold
+            fprintf('  [%3d/%3d] %-30s  OK  (LOW SNR %.1f dB)\n', ...
+                k, numel(files), files(k).name, featRow.SNRproxy);
+        else
+            fprintf('  [%3d/%3d] %-30s  OK\n', k, numel(files), files(k).name);
+        end
+catch ME
+        fprintf('  [%3d/%3d] %-30s  SKIPPED: %s\n', ...
+            k, numel(files), files(k).name, ME.message);
+end
+end
+% ---- write one master table keyed by FileName ----
+if ~isempty(masterTable)
+    csvPath = fullfile(outDir, sprintf('features_%s_%s.csv', activityLabel, conditionLabel));
+    writetable(masterTable, csvPath);
+    save(fullfile(outDir, sprintf('features_%s_%s.mat', activityLabel, conditionLabel)), 'masterTable');
+    nLow = sum(masterTable.SNRproxy < P.snrThreshold);
+    fprintf('\nDone. %d files processed (%d flagged low-SNR).\n', height(masterTable), nLow);
+    fprintf('Images + per-file .mat in: %s\n', outDir);
+    fprintf('Master table: %s\n', csvPath);
+else
+    fprintf('\nNo files processed successfully.\n');
+end
+%% ====================== PER-FILE PROCESSING FUNCTION ======================
+function [featRow, roiFeat, specFeat] = extract_roi_features(binPath, tag, P, activityLabel, conditionLabel, outDir)
+% ---- load + reshape ----
+    adcData = readDCA1000(binPath);
+    adcData = reshape(adcData, P.numRx, P.numADCSamples, P.loops, P.frames);
+% ---- clutter removal ----
+    adcData = adcData - mean(adcData, 3);
+% ---- range window + range FFT ----
+    windowRange = hamming(P.numADCSamples)';
+    adcData     = adcData .* windowRange;
+    rangeFFT    = fft(adcData, P.numADCSamples, 2) / P.numADCSamples;
+% ---- doppler window + doppler FFT ----
+    windowDoppler = reshape(hamming(P.loops)', [1, 1, P.loops, 1]);
+    rangeFFT      = rangeFFT .* windowDoppler;
+    dopplerFFT    = fftshift(fft(rangeFFT, P.loops, 3), 3);
+    dopplerMag    = abs(dopplerFFT);
+% ---- collapse Rx + range -> doppler-time, peak-normalize ----
+    avgDoppler = squeeze(sum(sum(dopplerMag, 1), 2));        % [vel x time]
+    avgDoppler = avgDoppler / max(avgDoppler(:));
+    avgDoppler_dB = 20*log10(avgDoppler + eps);
+% ---- SNR proxy (peak is always 0 dB, so -median ≈ peak-to-noise gap) ----
+    snrProxy = -median(avgDoppler_dB(:));
+% ---- axes ----
+    dopplerFreqAxis = (-P.loops/2 : P.loops/2-1) * (P.PRF / P.loops);
+    velocityAxis    = dopplerFreqAxis * P.lambda / 2;
+    velocityAxis    = velocityAxis(:);                      % [vel x 1]
+% ---- ROI mask (adaptive mean + 2*std, component filter) ----
+    meanSpec  = mean(avgDoppler_dB(:));
+    stdSpec   = std(avgDoppler_dB(:));
+    threshold = meanSpec + 2*stdSpec;
+    binaryMask = avgDoppler_dB > threshold;
+    CC    = bwconncomp(binaryMask);
+    stats = regionprops(CC, 'Area');
+    filteredMask = false(size(binaryMask));
+for i = 1:numel(stats)
+if stats(i).Area > P.minArea
+            filteredMask(CC.PixelIdxList{i}) = true;
+end
+end
+if ~any(filteredMask(:))
+        error('empty ROI (no pixels above threshold)');
+end
+    maskedSpectrogram = avgDoppler_dB .* filteredMask;
+% ---- ROI morphology features (union of foreground as one region) ----
+    rs = regionprops(double(filteredMask), 'Area','Centroid','Orientation', ...
+'Perimeter','MajorAxisLength','MinorAxisLength','Eccentricity');
+    roiFeat.Area            = rs.Area;
+    roiFeat.Centroid        = rs.Centroid;
+    roiFeat.Orientation     = rs.Orientation;
+    roiFeat.Perimeter       = rs.Perimeter;
+    roiFeat.MajorAxisLength = rs.MajorAxisLength;
+    roiFeat.MinorAxisLength = rs.MinorAxisLength;
+    roiFeat.Eccentricity    = rs.Eccentricity;
+% ---- spectrogram features (full linear power) ----
+    Pw = avgDoppler;  v = velocityAxis;
+    energyCurve = sum(Pw, 1);
+    W = Pw ./ (sum(Pw,1) + eps);
+    centroidCurve  = sum(W .* v, 1);
+    bandwidthCurve = sqrt(sum(W .* (v - centroidCurve).^2, 1));
+    p = Pw(:); p = p / (sum(p) + eps);
+    specEntropy = -sum(p .* log2(p + eps));
+    Pv = sum(Pw,2); wv = Pv / (sum(Pv) + eps);
+    muV  = sum(wv .* v);
+    sigV = sqrt(sum(wv .* (v - muV).^2));
+    specSkewness = sum(wv .* (v - muV).^3) / (sigV^3 + eps);
+    specFeat.entropy        = specEntropy;
+    specFeat.skewness       = specSkewness;
+    specFeat.centroidCurve  = centroidCurve;
+    specFeat.bandwidthCurve = bandwidthCurve;
+    specFeat.energyCurve    = energyCurve;
+    specFeat.centroidMean   = mean(centroidCurve);
+    specFeat.bandwidthMean  = mean(bandwidthCurve);
+    specFeat.energyTotal    = sum(energyCurve);
+    specFeat.snrProxy       = snrProxy;
+% ---- borderless gray ROI image (dataset input) ----
+    gimg = (maskedSpectrogram - P.floor_dB) / (0 - P.floor_dB);
+    gimg = flipud(min(max(gimg,0),1));
+    imwrite(im2uint8(gimg), fullfile(outDir, sprintf('ROI_%s.png', tag)));
+% ---- borderless RGB doppler-time spectrogram (jet, dataset input) ----
+    rgbimg = (avgDoppler_dB - P.floor_dB_rgb) / (0 - P.floor_dB_rgb);
+    rgbimg = flipud(min(max(rgbimg,0),1));
+    rgbimg = ind2rgb(im2uint8(rgbimg), jet(256));
+    imwrite(rgbimg, fullfile(outDir, sprintf('RGB_%s.png', tag)));
+% ---- scalar feature row keyed by FileName ----
+    featRow = table(string(tag), string(activityLabel), string(conditionLabel), ...
+        roiFeat.Area, roiFeat.Orientation, roiFeat.Centroid(1), roiFeat.Centroid(2), ...
+        roiFeat.Perimeter, roiFeat.MajorAxisLength, roiFeat.MinorAxisLength, roiFeat.Eccentricity, ...
+        specFeat.entropy, specFeat.skewness, specFeat.centroidMean, specFeat.bandwidthMean, specFeat.energyTotal, ...
+        snrProxy, ...
+'VariableNames', {'FileName','Activity','Condition', ...
+'Area','Orientation','CentroidX','CentroidY','Perimeter', ...
+'MajorAxis','MinorAxis','Eccentricity', ...
+'Entropy','Skewness','CentroidMean','BandwidthMean','EnergyTotal', ...
+'SNRproxy'});
+end
