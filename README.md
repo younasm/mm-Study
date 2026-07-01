@@ -38,11 +38,8 @@ Once released, this repository will include:
 
 | Component | Description |
 |---|---|
-| 📦 **Dataset** | mmWave radar recordings of study-related activities in tabletop scenarios bin files |
+| 📦 **Dataset** | mmWave radar recordings of study-related activities in tabletop scenarios in csv file |
 | 🧠 **Feature Extraction** | Micro-Doppler signature processing and feature fusion pipelines |
-| 🤖 **Models** | Activity recognition models with training and evaluation scripts |
-| 📊 **Results** | Reproducible experiment results as reported in the paper |
-| 📖 **Documentation** | Setup guides, data format specifications, and usage examples |
 
 ---
 
