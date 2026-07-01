@@ -2,8 +2,8 @@
 
 ![Status](https://img.shields.io/badge/Status-Coming%20Soon-yellow)
 ![Dataset](https://img.shields.io/badge/Dataset-Pending%20Release-orange)
-![Code](https://img.shields.io/badge/Code-Pending%20Release-orange)
-![License](https://img.shields.io/badge/License-TBD-lightgrey)
+![Code](https://img.shields.io/badge/Code-Released-brightgreen)
+![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
 
