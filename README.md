@@ -48,12 +48,15 @@ Once released, this repository will include:
 If you find this work relevant to your research, please consider citing our paper once it is published:
 
 ```bibtex
-@article{mmstudy2025,
-  title     = {mm-Study: Activity Recognition in Study Environments Using mmWave Radar Micro-Doppler Signatures Feature Fusion in Tabletop Scenarios},
-  author    = {Muhammad Younas, Jian Zhang, Xiaotao Xu, Fahim Niaz, Naveed Imran, Jehad Ali},
-  journal   = {Pervasive and Mobile Computing},
-  year      = {2026},
-  DOI       = {https://doi.org/10.1016/j.pmcj.2026.102268}
+@article{mmstudy2026,
+  title   = {mm-Study: Activity recognition in study environments using mmWave radar micro-doppler signatures feature fusion in tabletop scenarios},
+  author  = {Younas, Muhammad and Zhang, Jian and Xu, Xiaotao and Niaz, Fahim and Imran, Naveed and Ali, Jehad},
+  journal = {Pervasive and Mobile Computing},
+  year    = {2026},
+  pages   = {102268},
+  issn    = {1574-1192},
+  doi     = {10.1016/j.pmcj.2026.102268},
+  url     = {https://www.sciencedirect.com/science/article/pii/S1574119226001094}
 }
 ```
 
