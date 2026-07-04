@@ -45,7 +45,7 @@ Once released, this repository will include:
 
 ## 📄 Citation
 
-If you find this work relevant to your research, please consider citing our paper once it is published:
+If you find this work relevant to your research, please consider citing our paper:
 
 ```bibtex
 @article{mmstudy2026,
