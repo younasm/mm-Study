@@ -51,8 +51,9 @@ If you find this work relevant to your research, please consider citing our pape
 @article{mmstudy2025,
   title     = {mm-Study: Activity Recognition in Study Environments Using mmWave Radar Micro-Doppler Signatures Feature Fusion in Tabletop Scenarios},
   author    = {[Authors]},
-  journal   = {[Journal/Conference]},
-  year      = {2025}
+  journal   = {Pervasive and Mobile Computing},
+  year      = {2026},
+  DOI       = {https://doi.org/10.1016/j.pmcj.2026.102268}
 }
 ```
 
