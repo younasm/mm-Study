@@ -50,7 +50,7 @@ If you find this work relevant to your research, please consider citing our pape
 ```bibtex
 @article{mmstudy2025,
   title     = {mm-Study: Activity Recognition in Study Environments Using mmWave Radar Micro-Doppler Signatures Feature Fusion in Tabletop Scenarios},
-  author    = {[Authors]},
+  author    = {Muhammad Younas, Jian Zhang, Xiaotao Xu, Fahim Niaz, Naveed Imran, Jehad Ali},
   journal   = {Pervasive and Mobile Computing},
   year      = {2026},
   DOI       = {https://doi.org/10.1016/j.pmcj.2026.102268}
